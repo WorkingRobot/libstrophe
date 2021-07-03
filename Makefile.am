@@ -97,7 +97,6 @@ EXTRA_DIST = \
 	MIT-LICENSE.txt \
 	bootstrap.sh \
 	build-android.sh \
-	docs/footer.html \
 	examples/README.md \
 	jni/Android.mk \
 	jni/Application.mk \
@@ -170,6 +169,16 @@ TESTS += tests/test_xmppaddr
 endif
 
 check_PROGRAMS = $(TESTS)
+
+if FUZZ
+check_PROGRAMS += tests/test_fuzz
+
+tests_test_fuzz_SOURCES = tests/test_fuzz.c
+tests_test_fuzz_CFLAGS = -fsanitize=fuzzer,address  $(PARSER_CFLAGS) $(STROPHE_FLAGS) \
+	-I$(top_srcdir)/src
+tests_test_fuzz_LDADD = $(STROPHE_LIBS)
+tests_test_fuzz_LDFLAGS = -static
+endif
 
 tests_check_parser_SOURCES = tests/check_parser.c tests/test.h
 tests_check_parser_CFLAGS = $(PARSER_CFLAGS) $(STROPHE_FLAGS) \

@@ -226,6 +226,15 @@ char* parser_attr_name(xmpp_ctx_t* ctx, char* nsname)
     return _xml_name(ctx, nsname);
 }
 
+static void _free_parent_stanza(xmpp_stanza_t *stanza)
+{
+    xmpp_stanza_t *parent;
+
+    for (parent = stanza; parent->parent != NULL; parent = parent->parent)
+        ;
+    xmpp_stanza_release(parent);
+}
+
 /* free a parser */
 void parser_free(parser_t* parser)
 {
@@ -233,6 +242,11 @@ void parser_free(parser_t* parser)
 
     if (parser->expat)
         XML_ParserFree(parser->expat);
+
+    if (parser->stanza) {
+        _free_parent_stanza(parser->stanza);
+        parser->stanza = NULL;
+    }
 
     xmpp_free(parser->ctx, parser);
 }
@@ -265,6 +279,11 @@ int parser_reset(parser_t* parser, int depth)
         mem.malloc_fcn = malloc_fcn;
         mem.realloc_fcn = realloc_fcn;
         mem.free_fcn = free_fcn;
+
+        if (parser->stanza) {
+            _free_parent_stanza(parser->stanza);
+            parser->stanza = NULL;
+        }
 
         XML_Char sep = NAMESPACE_SEP;
 
