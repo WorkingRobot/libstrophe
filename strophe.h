@@ -39,6 +39,10 @@ extern "C" {
  *  Namespace definition for 'urn:ietf:params:xml:ns:xmpp-streams'.
  */
 #define XMPP_NS_STREAMS_IETF "urn:ietf:params:xml:ns:xmpp-streams"
+/** @def XMPP_NS_WEBSOCKETS_IETF
+*  Namespace definition for 'urn:ietf:params:xml:ns:xmpp-framing'.
+*/
+#define XMPP_NS_WEBSOCKETS_IETF "urn:ietf:params:xml:ns:xmpp-framing"
 /** @def XMPP_NS_STANZAS_IETF
  *  Namespace definition for 'urn:ietf:params:xml:ns:xmpp-stanzas'.
  */
@@ -278,6 +282,26 @@ void xmpp_send(xmpp_conn_t *conn, xmpp_stanza_t *stanza);
 
 void xmpp_send_raw_string(xmpp_conn_t *conn, const char *fmt, ...);
 void xmpp_send_raw(xmpp_conn_t *conn, const char *data, size_t len);
+
+/* externally managed, event driven socket */
+typedef void(*xmpp_extsock_connect_handler)(void * const userdata);
+typedef void(*xmpp_extsock_close_handler)(void * const userdata);
+typedef void(*xmpp_extsock_send_handler)(const char * const data, const size_t len, void * const userdata);
+
+typedef struct {
+	xmpp_extsock_connect_handler connect_handler;
+	xmpp_extsock_close_handler close_handler;
+	xmpp_extsock_send_handler send_handler;
+	int is_websocket;
+	void* userdata;
+} xmpp_conn_extsock_t;
+
+void xmpp_conn_set_extsock_handlers(xmpp_conn_t * const conn, const xmpp_conn_extsock_t * const handlers);
+int xmpp_extsock_connect_client(xmpp_conn_t * const conn, xmpp_conn_handler callbask, void * const userdata);
+void xmpp_extsock_connected(xmpp_conn_t * const conn);
+void xmpp_extsock_connection_error(xmpp_conn_t * const conn, const char * const reason);
+void xmpp_extsock_receive(xmpp_conn_t * const conn, const char * const data, const size_t len);
+void xmpp_extsock_parser_reset(xmpp_conn_t * const conn); /* call at websocket message boundaries */
 
 /* handlers */
 

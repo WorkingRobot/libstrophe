@@ -45,6 +45,7 @@ extern "C" {
     } while (0)
 
 #elif defined(__LITTLE_ENDIAN__) ||                                 \
+      defined(_WIN32) ||                                            \
     (defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && \
      __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
 

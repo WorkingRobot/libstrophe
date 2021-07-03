@@ -16,86 +16,38 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <assert.h>
 
 #include <expat.h>
 
-#include "strophe.h"
+#include <strophe.h>
 #include "common.h"
 #include "parser.h"
 
-/* Allocate inner text by this number bytes more. Expat splits string
- * "new\nline" into 3 strings: "new" "\n" "line". Expecting this pattern,
- * we can leave few bytes in the inner_text for "\n". It should reduce
- * number of re-allocations in 2 times for multi-line texts. */
-#define INNER_TEXT_PADDING 2
+ /* Use the Unit Separator to delimit namespace and name in our XML*/
+#define NAMESPACE_SEP ('\x1F')
 
 struct _parser_t {
-    xmpp_ctx_t *ctx;
+    xmpp_ctx_t* ctx;
     XML_Parser expat;
     parser_start_callback startcb;
     parser_end_callback endcb;
     parser_stanza_callback stanzacb;
-    void *userdata;
+    void* userdata;
     int depth;
-    xmpp_stanza_t *stanza;
-    char *inner_text;
-    /* number of allocated bytes */
-    int inner_text_size;
-    /* excluding terminal '\0' */
-    int inner_text_used;
-};
-
-/* Use the Unit Separator to delimit namespace and name in our XML */
-const XML_Char namespace_sep = '\x1F';
-
-/*
- * Cached strophe ctx. It is used for memory suite.
- * Note, expat doesn't support userdata in memory suite, therefore,
- * we can support only one strophe context. If user creates more than one
- * context, this module will fallback to default library allocator for all
- * contexts other than mem_ctx.
- */
-static xmpp_ctx_t *mem_ctx = NULL;
-
-static void *parser_mem_malloc(size_t size)
-{
-    if (mem_ctx != NULL)
-        return xmpp_alloc(mem_ctx, size);
-    else
-        return NULL;
-}
-
-static void *parser_mem_realloc(void *ptr, size_t size)
-{
-    if (mem_ctx != NULL)
-        return xmpp_realloc(mem_ctx, ptr, size);
-    else
-        return NULL;
-}
-
-static void parser_mem_free(void *ptr)
-{
-    if (mem_ctx != NULL)
-        xmpp_free(mem_ctx, ptr);
-}
-
-static const XML_Memory_Handling_Suite parser_mem_suite = {
-    .malloc_fcn = &parser_mem_malloc,
-    .realloc_fcn = &parser_mem_realloc,
-    .free_fcn = &parser_mem_free,
+    xmpp_stanza_t* stanza;
 };
 
 /* return allocated string with the name from a delimited
  * namespace/name string */
-static char *_xml_name(xmpp_ctx_t *ctx, const char *nsname)
+static char* _xml_name(xmpp_ctx_t* ctx, const char* nsname)
 {
-    char *result = NULL;
-    const char *c;
+    char* result = NULL;
+    const char* c;
     size_t len;
 
-    c = strchr(nsname, namespace_sep);
-    if (c == NULL)
-        return xmpp_strdup(ctx, nsname);
+    c = strchr(nsname, NAMESPACE_SEP);
+    if (c == NULL) return xmpp_strdup(ctx, nsname);
 
     c++;
     len = strlen(c);
@@ -109,12 +61,12 @@ static char *_xml_name(xmpp_ctx_t *ctx, const char *nsname)
 }
 
 /* return allocated string with the namespace from a delimited string */
-static char *_xml_namespace(xmpp_ctx_t *ctx, const char *nsname)
+static char* _xml_namespace(xmpp_ctx_t* ctx, const char* nsname)
 {
-    char *result = NULL;
-    const char *c;
+    char* result = NULL;
+    const char* c;
 
-    c = strchr(nsname, namespace_sep);
+    c = strchr(nsname, NAMESPACE_SEP);
     if (c != NULL) {
         result = xmpp_alloc(ctx, (c - nsname) + 1);
         if (result != NULL) {
@@ -126,13 +78,12 @@ static char *_xml_namespace(xmpp_ctx_t *ctx, const char *nsname)
     return result;
 }
 
-static void _set_attributes(xmpp_stanza_t *stanza, const XML_Char **attrs)
+static void _set_attributes(xmpp_stanza_t* stanza, const XML_Char** attrs)
 {
-    char *attr;
+    char* attr;
     int i;
 
-    if (!attrs)
-        return;
+    if (!attrs) return;
 
     for (i = 0; attrs[i]; i += 2) {
         /* namespaced attributes aren't used in xmpp, discard namespace */
@@ -142,32 +93,13 @@ static void _set_attributes(xmpp_stanza_t *stanza, const XML_Char **attrs)
     }
 }
 
-static void complete_inner_text(parser_t *parser)
+static void _start_element(void* userdata,
+    const XML_Char* nsname,
+    const XML_Char** attrs)
 {
-    xmpp_stanza_t *stanza;
-
-    if (parser->inner_text) {
-        /* create and populate stanza */
-        stanza = xmpp_stanza_new(parser->ctx);
-        /* FIXME: disconnect on allocation error */
-        if (stanza) {
-            xmpp_stanza_set_text(stanza, parser->inner_text);
-            xmpp_stanza_add_child(parser->stanza, stanza);
-            xmpp_stanza_release(stanza);
-        }
-        xmpp_free(parser->ctx, parser->inner_text);
-        parser->inner_text = NULL;
-        parser->inner_text_size = 0;
-        parser->inner_text_used = 0;
-    }
-}
-
-static void
-_start_element(void *userdata, const XML_Char *nsname, const XML_Char **attrs)
-{
-    parser_t *parser = (parser_t *)userdata;
-    xmpp_stanza_t *child;
-    char *ns, *name;
+    parser_t* parser = (parser_t*)userdata;
+    xmpp_stanza_t* child;
+    char* ns, * name;
 
     ns = _xml_namespace(parser->ctx, nsname);
     name = _xml_name(parser->ctx, nsname);
@@ -175,14 +107,17 @@ _start_element(void *userdata, const XML_Char *nsname, const XML_Char **attrs)
     if (parser->depth == 0) {
         /* notify the owner */
         if (parser->startcb)
-            parser->startcb(name, (char **)attrs, parser->userdata);
-    } else {
+            parser->startcb((char*)name, (char**)attrs,
+                parser->userdata);
+    }
+    else {
         /* build stanzas at depth 1 */
         if (!parser->stanza && parser->depth != 1) {
             /* something terrible happened */
             /* FIXME: shutdown disconnect */
             xmpp_error(parser->ctx, "parser", "oops, where did our stanza go?");
-        } else {
+        }
+        else {
             child = xmpp_stanza_new(parser->ctx);
             if (!child) {
                 /* FIXME: can't allocate, disconnect */
@@ -193,7 +128,6 @@ _start_element(void *userdata, const XML_Char *nsname, const XML_Char **attrs)
                 xmpp_stanza_set_ns(child, ns);
 
             if (parser->stanza != NULL) {
-                complete_inner_text(parser);
                 xmpp_stanza_add_child(parser->stanza, child);
                 xmpp_stanza_release(child);
             }
@@ -201,74 +135,74 @@ _start_element(void *userdata, const XML_Char *nsname, const XML_Char **attrs)
         }
     }
 
-    if (ns)
-        xmpp_free(parser->ctx, ns);
-    if (name)
-        xmpp_free(parser->ctx, name);
+    if (ns) xmpp_free(parser->ctx, ns);
+    if (name) xmpp_free(parser->ctx, name);
 
     parser->depth++;
 }
 
-static void _end_element(void *userdata, const XML_Char *name)
+static void _end_element(void* userdata, const XML_Char* name)
 {
-    parser_t *parser = (parser_t *)userdata;
+    parser_t* parser = (parser_t*)userdata;
 
     parser->depth--;
 
     if (parser->depth == 0) {
         /* notify the owner */
         if (parser->endcb)
-            parser->endcb((char *)name, parser->userdata);
-    } else {
-        complete_inner_text(parser);
+            parser->endcb((char*)name, parser->userdata);
+    }
+    else {
         if (parser->stanza->parent) {
             /* we're finishing a child stanza, so set current to the parent */
             parser->stanza = parser->stanza->parent;
-        } else {
+        }
+        else {
             if (parser->stanzacb)
-                parser->stanzacb(parser->stanza, parser->userdata);
+                parser->stanzacb(parser->stanza,
+                    parser->userdata);
             xmpp_stanza_release(parser->stanza);
             parser->stanza = NULL;
         }
     }
 }
 
-static void _characters(void *userdata, const XML_Char *s, int len)
+static void _characters(void* userdata, const XML_Char* s, int len)
 {
-    parser_t *parser = (parser_t *)userdata;
-    char *p;
+    parser_t* parser = (parser_t*)userdata;
+    xmpp_stanza_t* stanza;
 
-    if (parser->depth < 2)
+    if (parser->depth < 2) return;
+
+    /* create and populate stanza */
+    stanza = xmpp_stanza_new(parser->ctx);
+    if (!stanza) {
+        /* FIXME: allocation error, disconnect */
         return;
-
-    /* Join all parts to a single resulting string. Stanza is created in
-     * _start_element() and _end_element(). */
-    if (parser->inner_text_used + len >= parser->inner_text_size) {
-        parser->inner_text_size =
-            parser->inner_text_used + len + 1 + INNER_TEXT_PADDING;
-        p = xmpp_realloc(parser->ctx, parser->inner_text,
-                         parser->inner_text_size);
-        if (p == NULL) {
-            xmpp_free(parser->ctx, parser->inner_text);
-            parser->inner_text = NULL;
-            parser->inner_text_used = 0;
-            parser->inner_text_size = 0;
-            return;
-        }
-        parser->inner_text = p;
-        parser->inner_text[parser->inner_text_used] = '\0';
     }
-    parser->inner_text_used += len;
-    strncat(parser->inner_text, s, len);
+    xmpp_stanza_set_text_with_size(stanza, s, len);
+
+    xmpp_stanza_add_child(parser->stanza, stanza);
+    xmpp_stanza_release(stanza);
 }
 
-parser_t *parser_new(xmpp_ctx_t *ctx,
-                     parser_start_callback startcb,
-                     parser_end_callback endcb,
-                     parser_stanza_callback stanzacb,
-                     void *userdata)
+const xmpp_mem_t* GXmppMem = NULL;
+static void UpdateMemCtx(parser_t* parser)
 {
-    parser_t *parser;
+    assert(parser);
+    assert(parser->ctx);
+    assert(parser->ctx->mem);
+
+    GXmppMem = parser->ctx->mem;
+}
+
+parser_t* parser_new(xmpp_ctx_t* ctx,
+    parser_start_callback startcb,
+    parser_end_callback endcb,
+    parser_stanza_callback stanzacb,
+    void* userdata)
+{
+    parser_t* parser;
 
     parser = xmpp_alloc(ctx, sizeof(parser_t));
     if (parser != NULL) {
@@ -280,69 +214,70 @@ parser_t *parser_new(xmpp_ctx_t *ctx,
         parser->userdata = userdata;
         parser->depth = 0;
         parser->stanza = NULL;
-        parser->inner_text = NULL;
-        parser->inner_text_size = 0;
-        parser->inner_text_used = 0;
 
-        parser_reset(parser);
+        parser_reset(parser, 0);
     }
 
     return parser;
 }
 
-char *parser_attr_name(xmpp_ctx_t *ctx, char *nsname)
+char* parser_attr_name(xmpp_ctx_t* ctx, char* nsname)
 {
     return _xml_name(ctx, nsname);
 }
 
 /* free a parser */
-void parser_free(parser_t *parser)
+void parser_free(parser_t* parser)
 {
+    UpdateMemCtx(parser);
+
     if (parser->expat)
         XML_ParserFree(parser->expat);
-
-    if (parser->inner_text) {
-        xmpp_free(parser->ctx, parser->inner_text);
-        parser->inner_text = NULL;
-    }
 
     xmpp_free(parser->ctx, parser);
 }
 
-/* shuts down and restarts XML parser.  true on success */
-int parser_reset(parser_t *parser)
+void* malloc_fcn(size_t size)
 {
-    XML_Bool ret;
-    const XML_Memory_Handling_Suite *mem = NULL;
+    return GXmppMem->alloc(size, GXmppMem->userdata);
+}
 
-    if (parser->expat) {
-        ret = XML_ParserReset(parser->expat, NULL);
-        if (ret != XML_TRUE) {
-            XML_ParserFree(parser->expat);
-            parser->expat = NULL;
-        }
-    } else {
-        if (mem_ctx == NULL)
-            mem_ctx = parser->ctx;
-        if (parser->ctx == mem_ctx)
-            mem = &parser_mem_suite;
-        parser->expat = XML_ParserCreate_MM(NULL, mem, &namespace_sep);
+void* realloc_fcn(void* ptr, size_t size)
+{
+    return GXmppMem->realloc(ptr, size, GXmppMem->userdata);
+}
+
+void free_fcn(void* ptr)
+{
+    GXmppMem->free(ptr, GXmppMem->userdata);
+}
+
+/* shuts down and restarts XML parser.  true on success */
+int parser_reset(parser_t* parser, int depth)
+{
+    UpdateMemCtx(parser);
+
+    if (parser->expat)
+        XML_ParserReset(parser->expat, NULL);
+    else
+    {
+        XML_Memory_Handling_Suite mem;
+        mem.malloc_fcn = malloc_fcn;
+        mem.realloc_fcn = realloc_fcn;
+        mem.free_fcn = free_fcn;
+
+        XML_Char sep = NAMESPACE_SEP;
+
+        parser->expat = XML_ParserCreate_MM(NULL, &mem, &sep);
     }
 
-    if (parser->stanza) {
+    if (parser->stanza)
         xmpp_stanza_release(parser->stanza);
-        parser->stanza = NULL;
-    }
 
-    if (parser->inner_text) {
-        xmpp_free(parser->ctx, parser->inner_text);
-        parser->inner_text = NULL;
-    }
+    if (!parser->expat) return 0;
 
-    if (!parser->expat)
-        return 0;
-
-    parser->depth = 0;
+    parser->depth = depth;
+    parser->stanza = NULL;
 
     XML_SetUserData(parser->expat, parser);
     XML_SetElementHandler(parser->expat, _start_element, _end_element);
@@ -351,7 +286,9 @@ int parser_reset(parser_t *parser)
     return 1;
 }
 
-int parser_feed(parser_t *parser, char *chunk, int len)
+int parser_feed(parser_t* parser, char* chunk, int len)
 {
+    UpdateMemCtx(parser);
+
     return XML_Parse(parser->expat, chunk, len, 0);
 }

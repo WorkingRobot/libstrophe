@@ -189,6 +189,9 @@ xmpp_conn_t *xmpp_conn_new(xmpp_ctx_t *ctx)
             else
                 conn->ctx->connlist = item;
         }
+
+        /* default is to use built in sockets */
+        conn->extsock = NULL;
     }
 
     return conn;
@@ -340,6 +343,8 @@ int xmpp_conn_release(xmpp_conn_t *conn)
             xmpp_free(ctx, conn->pass);
         if (conn->lang)
             xmpp_free(ctx, conn->lang);
+        if (conn->extsock)
+            xmpp_free(ctx, conn->extsock);
         if (conn->tls_client_cert)
             xmpp_free(ctx, conn->tls_client_cert);
         if (conn->tls_client_key)
@@ -784,7 +789,12 @@ void conn_disconnect(xmpp_conn_t *conn)
         tls_free(conn->tls);
         conn->tls = NULL;
     }
-    sock_close(conn->sock);
+    if (conn->extsock) {
+        conn->extsock->close_handler(conn->extsock->userdata);
+    }
+    else {
+        sock_close(conn->sock);
+    }
 
     /* fire off connection handler */
     conn->conn_handler(conn, XMPP_CONN_DISCONNECT, conn->error,
@@ -803,7 +813,7 @@ void conn_prepare_reset(xmpp_conn_t *conn, xmpp_open_handler handler)
 void conn_parser_reset(xmpp_conn_t *conn)
 {
     conn->reset_parser = 0;
-    parser_reset(conn->parser);
+    parser_reset(conn->parser, 0);
 }
 
 /** Initiate termination of the connection to the XMPP server.
@@ -822,7 +832,12 @@ void xmpp_disconnect(xmpp_conn_t *conn)
         return;
 
     /* close the stream */
-    xmpp_send_raw_string(conn, "</stream:stream>");
+    if (conn->extsock && conn->extsock->is_websocket) {
+        xmpp_send_raw_string(conn, "<close xmlns=\"%s\" />", XMPP_NS_WEBSOCKETS_IETF);
+    }
+    else {
+        xmpp_send_raw_string(conn, "</stream:stream>");
+    }
 
     /* setup timed handler in case disconnect takes too long */
     handler_add_timed(conn, _disconnect_cleanup, DISCONNECT_TIMEOUT, NULL);
@@ -897,6 +912,12 @@ void xmpp_send_raw(xmpp_conn_t *conn, const char *data, size_t len)
     if (conn->state != XMPP_STATE_CONNECTED)
         return;
 
+    /* if there is an external socket, send directly to it */
+    if (conn->extsock) {
+        conn->extsock->send_handler(data, len, conn->extsock->userdata);
+        return;
+    }
+
     /* create send queue item for queue */
     item = xmpp_alloc(conn->ctx, sizeof(xmpp_send_queue_t));
     if (!item)
@@ -956,31 +977,42 @@ void xmpp_send(xmpp_conn_t *conn, xmpp_stanza_t *stanza)
  */
 void conn_open_stream(xmpp_conn_t *conn)
 {
-    size_t attributes_len;
-    int rc;
-    char *from = NULL;
-    char *ns = conn->type == XMPP_CLIENT ? XMPP_NS_CLIENT : XMPP_NS_COMPONENT;
-    char *attributes[12] = {
-        "to",           conn->domain,    "xml:lang", conn->lang,
-        "version",      "1.0",           "xmlns",    ns,
-        "xmlns:stream", XMPP_NS_STREAMS, "from",     NULL};
-
-    attributes_len = ARRAY_SIZE(attributes);
-    if (conn->tls && conn->jid && strchr(conn->jid, '@') != NULL)
-        from = xmpp_jid_bare(conn->ctx, conn->jid);
-
-    if (from)
-        attributes[attributes_len - 1] = from;
-    else
-        attributes_len -= 2;
-
-    rc = _conn_open_stream_with_attributes(conn, attributes, attributes_len);
-    if (rc != XMPP_EOK) {
-        xmpp_error(conn->ctx, "conn", "Cannot build stream tag: memory error");
-        conn_disconnect(conn);
+    if (conn->extsock && conn->extsock->is_websocket) {
+        xmpp_send_raw_string(conn,
+            "<open "                                      \
+            "xmlns=\"%s\" "                               \
+            "to=\"%s\" "                                  \
+            "version=\"1.0\" />",
+            XMPP_NS_WEBSOCKETS_IETF,
+            conn->domain);
     }
-    if (from)
-        xmpp_free(conn->ctx, from);
+    else {
+        size_t attributes_len;
+        int rc;
+        char* from = NULL;
+        char* ns = conn->type == XMPP_CLIENT ? XMPP_NS_CLIENT : XMPP_NS_COMPONENT;
+        char* attributes[12] = {
+            "to",           conn->domain,    "xml:lang", conn->lang,
+            "version",      "1.0",           "xmlns",    ns,
+            "xmlns:stream", XMPP_NS_STREAMS, "from",     NULL };
+
+        attributes_len = ARRAY_SIZE(attributes);
+        if (conn->tls && conn->jid && strchr(conn->jid, '@') != NULL)
+            from = xmpp_jid_bare(conn->ctx, conn->jid);
+
+        if (from)
+            attributes[attributes_len - 1] = from;
+        else
+            attributes_len -= 2;
+
+        rc = _conn_open_stream_with_attributes(conn, attributes, attributes_len);
+        if (rc != XMPP_EOK) {
+            xmpp_error(conn->ctx, "conn", "Cannot build stream tag: memory error");
+            conn_disconnect(conn);
+        }
+        if (from)
+            xmpp_free(conn->ctx, from);
+    }
 }
 
 int conn_tls_start(xmpp_conn_t *conn)
@@ -1142,6 +1174,97 @@ int xmpp_conn_is_disconnected(xmpp_conn_t *conn)
     return conn->state == XMPP_STATE_DISCONNECTED;
 }
 
+void xmpp_conn_set_extsock_handlers(xmpp_conn_t* const conn, const xmpp_conn_extsock_t* const handlers)
+{
+    if (conn->extsock) {
+        xmpp_free(conn->ctx, conn->extsock);
+        conn->extsock = NULL;
+    }
+
+    if (!handlers) {
+        return;
+    }
+
+    conn->extsock = xmpp_alloc(conn->ctx, sizeof(xmpp_conn_extsock_t));
+
+    conn->extsock->connect_handler = handlers->connect_handler;
+    conn->extsock->close_handler = handlers->close_handler;
+    conn->extsock->send_handler = handlers->send_handler;
+    conn->extsock->is_websocket = handlers->is_websocket;
+    conn->extsock->userdata = handlers->userdata;
+}
+
+int xmpp_extsock_connect_client(xmpp_conn_t* const conn, xmpp_conn_handler callback, void* const userdata)
+{
+    if (!conn->extsock) {
+        return XMPP_EINVOP;
+    }
+
+    if (conn->state != XMPP_STATE_DISCONNECTED) {
+        return XMPP_EINVOP;
+    }
+
+    char* domain = xmpp_jid_domain(conn->ctx, conn->jid);
+    if (!domain)
+    {
+        return XMPP_EMEM;
+    }
+
+    _conn_reset(conn);
+
+    conn->type = XMPP_CLIENT;
+    conn->domain = domain;
+
+    /* setup handler */
+    conn->conn_handler = callback;
+    conn->userdata = userdata;
+
+    conn_prepare_reset(conn, auth_handle_open);
+
+    conn->extsock->connect_handler(conn->extsock->userdata);
+
+    conn->state = XMPP_STATE_CONNECTING;
+    conn->timeout_stamp = time_stamp();
+    xmpp_debug(conn->ctx, "xmpp", "Attempting to connect using external socket");
+
+    return XMPP_EOK;
+}
+
+void xmpp_extsock_connected(xmpp_conn_t* const conn)
+{
+    conn->state = XMPP_STATE_CONNECTED;
+    xmpp_debug(conn->ctx, "xmpp", "connection successful");
+
+    if (conn->extsock->is_websocket) {
+        // go straight to opening the stream because ssl is handled at the websocket layer
+        conn_open_stream(conn);
+    }
+    else {
+        conn_established(conn);
+    }
+}
+
+void xmpp_extsock_connection_error(xmpp_conn_t* const conn, const char* const reason)
+{
+    conn->error = ENOTCONN;
+    xmpp_debug(conn->ctx, "xmpp", "connection failed, error %s", reason);
+    conn_disconnect(conn);
+}
+
+void xmpp_extsock_receive(xmpp_conn_t* const conn, const char* const data, const size_t len)
+{
+    if (conn->reset_parser) {
+        conn_parser_reset(conn);
+    }
+
+    parser_feed(conn->parser, (char*)data, len);
+}
+
+void xmpp_extsock_parser_reset(xmpp_conn_t* const conn)
+{
+    parser_reset(conn->parser, 1);
+}
+
 /* timed handler for cleanup if normal disconnect procedure takes too long */
 static int _disconnect_cleanup(xmpp_conn_t *conn, void *userdata)
 {
@@ -1297,7 +1420,7 @@ static void _handle_stream_start(char *name, char **attrs, void *userdata)
         xmpp_free(conn->ctx, conn->stream_id);
     conn->stream_id = NULL;
 
-    if (strcmp(name, "stream") == 0) {
+    if (strcmp(name, "stream") == 0 || (conn->extsock && conn->extsock->is_websocket && strcmp(name, "open") == 0)) {
         _log_open_tag(conn, attrs);
         id = _get_stream_attribute(attrs, "id");
         if (id)
@@ -1329,9 +1452,14 @@ static void _handle_stream_end(char *name, void *userdata)
 
     UNUSED(name);
 
-    /* stream is over */
-    xmpp_debug(conn->ctx, "xmpp", "RECV: </stream:stream>");
-    conn_disconnect_clean(conn);
+    if (conn->extsock && conn->extsock->is_websocket) {
+        /* websocket based xmpp connection has each stanza as its own document */
+    }
+    else {
+        /* stream is over */
+        xmpp_debug(conn->ctx, "xmpp", "RECV: </stream:stream>");
+        conn_disconnect_clean(conn);
+    }
 }
 
 static void _handle_stream_stanza(xmpp_stanza_t *stanza, void *userdata)
